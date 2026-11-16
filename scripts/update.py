@@ -392,46 +392,72 @@ def fmt_num(v, dec=2):
 
 # ----------------------------------------------------------------------------- KI
 class AI:
+    """KI-Zugang (OpenAI-kompatible Schnittstelle, Standard: Google Gemini).
+    Zählt Aufrufe je Modell und Tag; ein Modell mit erschöpftem Kontingent wird für den Lauf gesperrt."""
+
     def __init__(self, cfg, state):
         a = cfg.get("ai", {})
         self.key = os.environ.get("AI_API_KEY", "").strip()
         self.url = os.environ.get("AI_BASE_URL") or a.get("baseUrl")
         self.model = os.environ.get("AI_MODEL") or a.get("model")
+        self.dossier_model = os.environ.get("AI_DOSSIER_MODEL") or a.get("dossierModel") or self.model
         self.max_day = int(a.get("maxCallsPerDay", 40))
+        self.max_dossier_day = int(a.get("dossierMaxCallsPerDay", 12))
         today = berlin_now().date().isoformat()
         if state.get("aiDate") != today:
-            state["aiDate"], state["aiCalls"] = today, 0
+            state["aiDate"], state["aiCalls"], state["aiByModel"] = today, 0, {}
+        state.setdefault("aiByModel", {})
         self.state = state
+        self.blocked = {}
         self.enabled = bool(self.key and self.url and self.model)
         self.disabled_reason = None if self.enabled else "kein KI-Schlüssel hinterlegt"
 
-    def budget(self):
-        return self.max_day - self.state.get("aiCalls", 0)
+    def used(self, model):
+        return self.state["aiByModel"].get(model, 0)
 
-    def chat(self, system, user, max_tokens=4000):
-        if not self.enabled or self.budget() <= 0:
+    def budget(self, model=None):
+        model = model or self.model
+        cap = self.max_dossier_day if (model == self.dossier_model and model != self.model) else self.max_day
+        return cap - self.used(model)
+
+    def usable(self, model=None):
+        model = model or self.model
+        return self.enabled and model not in self.blocked and self.budget(model) > 0
+
+    def chat(self, system, user, max_tokens=4000, model=None, timeout=120):
+        model = model or self.model
+        if not self.usable(model):
             return None
-        body = json.dumps({"model": self.model, "temperature": 0.2, "max_tokens": max_tokens,
+        body = json.dumps({"model": model, "temperature": 0.25, "max_tokens": max_tokens,
                            "messages": [{"role": "system", "content": system},
                                         {"role": "user", "content": user}]}).encode()
         req = urllib.request.Request(self.url, data=body, method="POST", headers={
             "Content-Type": "application/json", "Authorization": f"Bearer {self.key}"})
+        self.state["aiByModel"][model] = self.used(model) + 1
         self.state["aiCalls"] = self.state.get("aiCalls", 0) + 1
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 j = json.loads(r.read().decode())
             return j["choices"][0]["message"]["content"]
         except urllib.error.HTTPError as e:
             msg = e.read().decode("utf-8", "replace")[:300]
-            log(f"KI-Fehler HTTP {e.code}: {msg}")
+            log(f"KI-Fehler HTTP {e.code} ({model}): {msg}")
             if e.code in (401, 403):
                 self.enabled, self.disabled_reason = False, f"Schlüssel abgelehnt (HTTP {e.code})"
-            if e.code == 429:
-                self.enabled, self.disabled_reason = False, "Tageskontingent der KI erreicht (HTTP 429)"
+            elif e.code == 429:
+                self.blocked[model] = "Kontingent erreicht (HTTP 429)"
+                if model == self.model:
+                    self.disabled_reason = "Tageskontingent der KI erreicht (HTTP 429)"
+            elif e.code == 404:
+                self.blocked[model] = "Modell nicht gefunden (HTTP 404)"
             return None
         except Exception as e:
-            log(f"KI-Fehler: {e}")
+            log(f"KI-Fehler ({model}): {e}")
             return None
+
+    @property
+    def active(self):
+        return self.enabled and self.model not in self.blocked
 
 
 def parse_json_loose(txt):
@@ -469,7 +495,7 @@ def ai_articles(ai, items, cfg):
     todo.sort(key=lambda x: -x["score"])
     todo = todo[: int(a.get("maxArticlesPerRun", 32))]
     per = int(a.get("articlesPerCall", 8))
-    if not todo or not ai.enabled:
+    if not todo or not ai.usable():
         return 0
     if a.get("fetchFullText", True):
         with ThreadPoolExecutor(max_workers=6) as ex:
@@ -478,7 +504,7 @@ def ai_articles(ai, items, cfg):
             it["_full"] = t
     done = 0
     for i in range(0, len(todo), per):
-        if not ai.enabled or ai.budget() <= 1:  # 1 Aufruf für den Morgenbericht freihalten
+        if not ai.usable() or ai.budget() <= 1:  # 1 Aufruf für den Morgenbericht freihalten
             break
         batch = todo[i:i + per]
         parts = []
@@ -555,7 +581,7 @@ def rule_briefing(items, markets, cfg):
 
 
 def ai_briefing(ai, items, markets, cfg):
-    if not ai.enabled or ai.budget() <= 0:
+    if not ai.usable():
         return None
     since = NOW - dt.timedelta(hours=26)
     recent = [x for x in items if parse_date(x["published"]) >= since] or items
@@ -589,6 +615,252 @@ def ai_briefing(ai, items, markets, cfg):
             "art": "ki", "model": ai.model, "at": NOW.isoformat(timespec="seconds")}
 
 
+
+# ----------------------------------------------------------------------------- Google-News-Links auflösen
+def gnews_resolve(link, cache):
+    """Google-News-Links zeigen nicht direkt auf den Artikel. Hier wird – wie die Google-News-Seite
+    selbst – die eigentliche Verlags-Adresse erfragt. Gelingt das nicht, bleibt es beim Google-Link."""
+    if "news.google.com" not in (link or ""):
+        return link
+    if link in cache:
+        return cache[link]
+    try:
+        m = re.search(r"/articles/([^?/]+)", link)
+        if not m:
+            return None
+        gid = m.group(1)
+        raw, _ = http_get(f"https://news.google.com/articles/{gid}?hl=de&gl=DE&ceid=DE:de", timeout=15, accept="text/html", tries=1)
+        page = raw.decode("utf-8", "replace")
+        sg = re.search(r'data-n-a-sg="([^"]+)"', page)
+        ts = re.search(r'data-n-a-ts="([^"]+)"', page)
+        if not (sg and ts):
+            cache[link] = None
+            return None
+        inner = ('["garturlreq",[["X","X",["X","X"],null,null,1,1,"US:en",null,1,null,null,null,null,null,0,1],'
+                 '"X","X",1,[1,1,1],1,1,null,0,0,null,0],"%s",%s,"%s"]') % (gid, ts.group(1), sg.group(1))
+        freq = json.dumps([[["Fbv4je", inner, None, "generic"]]])
+        data = urllib.parse.urlencode({"f.req": freq}).encode()
+        req = urllib.request.Request("https://news.google.com/_/DotsSplashUi/data/batchexecute", data=data, method="POST",
+                                     headers={"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            txt = r.read().decode("utf-8", "replace")
+        part = txt.split("\n\n", 1)[1]
+        arr = json.loads(part)
+        url = json.loads(arr[0][2])[1]
+        if isinstance(url, str) and url.startswith("http"):
+            cache[link] = url
+            return url
+    except Exception as e:  # noqa
+        log(f"Google-News-Link nicht auflösbar: {str(e)[:80]}")
+    cache[link] = None
+    return None
+
+
+# ----------------------------------------------------------------------------- Wikipedia (Hintergrund)
+WIKI_UA = "MorgenBriefing/1.0 (private Nachrichten-App; Python urllib)"
+
+
+def wiki_extract(term, lang="de", chars=1800):
+    """Einleitung eines Wikipedia-Artikels (frei, ohne Schlüssel)."""
+    try:
+        q = urllib.parse.urlencode({"action": "query", "format": "json", "prop": "extracts|info", "inprop": "url",
+                                    "exintro": 1, "explaintext": 1, "redirects": 1, "titles": term})
+        req = urllib.request.Request(f"https://{lang}.wikipedia.org/w/api.php?{q}", headers={"User-Agent": WIKI_UA})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            j = json.loads(r.read().decode())
+        for pg in (j.get("query", {}).get("pages") or {}).values():
+            ext = (pg.get("extract") or "").strip()
+            if ext and "missing" not in pg:
+                return {"title": pg.get("title", term), "url": pg.get("fullurl") or f"https://{lang}.wikipedia.org/wiki/{urllib.parse.quote(term)}",
+                        "text": ext[:chars]}
+    except Exception as e:
+        log(f"Wikipedia {term}: {str(e)[:80]}")
+    return None
+
+
+def wiki_search(term, lang="de"):
+    try:
+        q = urllib.parse.urlencode({"action": "query", "format": "json", "list": "search", "srsearch": term, "srlimit": 1})
+        req = urllib.request.Request(f"https://{lang}.wikipedia.org/w/api.php?{q}", headers={"User-Agent": WIKI_UA})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            j = json.loads(r.read().decode())
+        hits = j.get("query", {}).get("search") or []
+        return hits[0]["title"] if hits else None
+    except Exception:
+        return None
+
+
+def hot_terms(items, n=3):
+    """Begriffe, die in vielen Schlagzeilen eines Themas vorkommen (für zusätzlichen Hintergrund)."""
+    cnt = {}
+    for it in items:
+        for w in set(re.findall(r"\b[A-ZÄÖÜ][\wäöüß\-]{3,}\b", it["title"])):
+            if w.lower() in ("der", "die", "das", "wie", "was", "warum", "neue", "neuer", "mehr", "nach", "beim", "this", "with", "from", "what", "will", "stock", "stocks", "market", "markets"):
+                continue
+            cnt[w] = cnt.get(w, 0) + 1
+    return [w for w, c in sorted(cnt.items(), key=lambda x: -x[1]) if c >= 3][:n]
+
+
+# ----------------------------------------------------------------------------- Themen-Dossiers
+SYS_DOSSIER = """Du bist leitende Fachredakteurin für Finanzmärkte, Wirtschaftspolitik und Immobilienwirtschaft (Bewertung, Märkte, Asset Management). Du schreibst für eine fachlich interessierte Leserin in Deutschland ein ausführliches, fundiertes THEMENDOSSIER zum aktuellen Stand.
+
+Arbeitsweise:
+- Lies ALLE gelieferten Quellen. Verschaffe dir ein Gesamtbild: Was sind die wichtigsten Entwicklungen, welche Fakten, Zahlen, Beispiele und Zusammenhänge gibt es, wo widersprechen sich Quellen?
+- Schreibe einen EIGENEN, neuen Artikel in deinen eigenen Worten. Keine längeren wörtlichen Übernahmen; kurze Zitate (unter 15 Wörtern) nur in Anführungszeichen mit Quelle.
+- Nutze ausschließlich Informationen aus den gelieferten Artikeln [1], [2], … und dem Hintergrundwissen [W1], [W2], … Erfinde keine Zahlen, Namen, Daten oder Ereignisse. Allgemeines Fachwissen zur Erklärung von Begriffen ist erlaubt, aber keine aktuellen Fakten ohne Quelle.
+- Belege jede konkrete Tatsachenaussage, Zahl und jedes Beispiel direkt im Satz mit der Quellennummer in eckigen Klammern, z. B. [3] oder [2][7] oder [W1].
+- Bei widersprüchlichen Angaben: beide nennen und einordnen. Bei dünner Quellenlage: das offen sagen.
+- Keine Anlageberatung, keine Kauf-/Verkaufsempfehlungen.
+
+Länge: richte dich nach der Informationsdichte. Mindestens 1000 Wörter. Bei viel Material 3000 bis 6000 Wörter oder mehr. Gründlich, konkret und detailliert, aber ohne Wiederholungen und Füllsätze.
+
+Form (Markdown, keine Tabellen, keine Bilder):
+# <prägnanter Titel des Dossiers>
+> <Vorspann: 2–3 Sätze, worum es heute geht>
+## Das Wichtigste in Kürze
+- 5–8 Spiegelstriche mit den zentralen Fakten und Zahlen
+## <thematische Kapitel, so viele wie sinnvoll, jeweils mit ### Unterkapiteln>
+(Fakten, Zahlen, konkrete Beispiele, Akteure, Ursachen, Zusammenhänge)
+## Hintergrund: Begriffe und Zusammenhänge
+(Erkläre die wichtigsten Fachbegriffe und Mechanismen, gestützt auf [W…] wo vorhanden)
+## Einordnung: Was bedeutet das?
+(Folgen für Märkte, Anleger, Zinsen, Immobilienwerte bzw. Asset Management – je nach Thema)
+## Ausblick: Worauf jetzt zu achten ist
+(nur, was aus den Quellen ableitbar ist: Termine, Daten, offene Fragen)
+Antworte nur mit dem Markdown-Text."""
+
+
+def build_dossier(ai, cat, items, markets, cfg, gcache):
+    a = cfg.get("ai", {})
+    n_full = int(a.get("dossierArticles", 25))
+    n_more = int(a.get("dossierMoreHeadlines", 40))
+    max_chars = int(a.get("dossierFulltextChars", 7000))
+    pool = sorted([x for x in items if cat["id"] in x["cats"]], key=lambda x: -x["score"])
+    if len(pool) < 3:
+        log(f"Dossier {cat['name']}: zu wenig Meldungen ({len(pool)})")
+        return None
+    main_items = pool[:n_full]
+
+    # echte Artikel-Adressen ermitteln und Volltexte lesen
+    def prep(it):
+        url = it.get("url") or gnews_resolve(it["link"], gcache) or it["link"]
+        if url and "news.google.com" not in url:
+            it["url"] = url
+        txt = fetch_fulltext(url, limit=max_chars) if url and "news.google.com" not in url else ""
+        return txt if len(txt) > 400 else ""
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        texts = list(ex.map(prep, main_items))
+
+    # Hintergrund aus Wikipedia
+    terms = list((cfg.get("dossierWiki") or {}).get(cat["id"], []))
+    for t in hot_terms(pool):
+        hit = wiki_search(t)
+        if hit and hit not in terms:
+            terms.append(hit)
+    wiki = []
+    for t in terms[:10]:
+        w = wiki_extract(t)
+        if w and w["title"] not in [x["title"] for x in wiki]:
+            wiki.append(w)
+
+    sources, parts = [], []
+    for i, (it, txt) in enumerate(zip(main_items, texts), 1):
+        sources.append({"n": i, "title": it["title"], "source": it["source"], "url": it.get("url") or it["link"],
+                        "published": it["published"], "id": it["id"], "full": bool(txt)})
+        body = txt or it.get("teaser") or "(nur Schlagzeile verfügbar)"
+        parts.append(f"[{i}] {it['source']}, {it['published'][:16].replace('T', ' ')} UTC – {it['title']}\n"
+                     f"{'VOLLTEXT' if txt else 'ANRISS'}: {body}")
+    k = len(main_items)
+    for j, it in enumerate(pool[n_full:n_full + n_more], k + 1):
+        sources.append({"n": j, "title": it["title"], "source": it["source"], "url": it.get("url") or it["link"],
+                        "published": it["published"], "id": it["id"], "full": False})
+        parts.append(f"[{j}] {it['source']} – {it['title']}" + (f" – {it['teaser'][:300]}" if it.get("teaser") else ""))
+    wparts = [f"[W{i}] Wikipedia: {w['title']}\n{w['text']}" for i, w in enumerate(wiki, 1)]
+    mk = ""
+    if cat["id"] in ("maerkte", "indizes", "geld", "politik"):
+        mk = "AKTUELLE MARKTDATEN (Stand " + NOW.strftime("%d.%m.%Y %H:%M UTC") + "):\n" + "\n".join(
+            f"{m['name']}: {fmt_num(m['price'])} ({m['chgPct']:+.2f} % zum Vortag, {m['chg1mPct']:+.2f} % in 1 Monat)"
+            for m in markets if m.get("ok") and m.get("price") is not None and m.get("chgPct") is not None and m.get("chg1mPct") is not None)
+    user = (f"THEMA: {cat['name']}\nDATUM: {berlin_now().strftime('%A, %d.%m.%Y')}\n\n"
+            + (mk + "\n\n" if mk else "")
+            + "ARTIKEL:\n\n" + "\n\n".join(parts)
+            + ("\n\nHINTERGRUNDWISSEN:\n\n" + "\n\n".join(wparts) if wparts else ""))
+
+    md = None
+    for model in (ai.dossier_model, ai.model):
+        if ai.usable(model):
+            md = ai.chat(SYS_DOSSIER, user, max_tokens=16000, model=model, timeout=300)
+            if md and len(md.split()) > 300:
+                used_model = model
+                break
+            md = None
+    if not md:
+        return None
+    md = re.sub(r"^```(?:markdown)?\s*|\s*```$", "", md.strip())
+    lines = md.splitlines()
+    title, lead, body = cat["name"], [], []
+    for ln in lines:
+        if ln.startswith("# ") and title == cat["name"] and not body:
+            title = ln[2:].strip()
+        elif ln.startswith(">") and not body:
+            lead.append(ln.lstrip("> ").strip())
+        else:
+            body.append(ln)
+    body_md = "\n".join(body).strip()
+    cited = set(int(n) for n in re.findall(r"\[(\d{1,3})\]", body_md))
+    wcited = set(int(n) for n in re.findall(r"\[W(\d{1,2})\]", body_md))
+    words = len(re.findall(r"\w+", body_md))
+    log(f"Dossier {cat['name']}: {words} Wörter, {len(cited)} Artikel zitiert, Modell {used_model}")
+    return {"topic": cat["id"], "name": cat["name"], "title": title[:200], "lead": " ".join(lead)[:800],
+            "body": body_md, "words": words, "model": used_model, "at": NOW.isoformat(timespec="seconds"),
+            "datum": berlin_now().date().isoformat(),
+            "sources": [s for s in sources if s["n"] in cited] or sources[:k],
+            "wiki": [{"n": i, "title": w["title"], "url": w["url"]} for i, w in enumerate(wiki, 1) if i in wcited],
+            "basis": {"articles": len(pool[:n_full + n_more]), "fulltext": sum(1 for t in texts if t), "wiki": len(wiki)}}
+
+
+def run_dossiers(ai, items, markets, cfg, state, prev):
+    """Erzeugt pro Lauf höchstens `dossiersPerRun` fehlende Dossiers des aktuellen Ausgabe-Zeitfensters."""
+    a = cfg.get("ai", {})
+    bnow = berlin_now()
+    hours = sorted(int(h) for h in a.get("dossierHoursBerlin", [4]))
+    slots = [h for h in hours if bnow.hour >= h]
+    by_topic = {d["topic"]: d for d in (prev or {}).get("items", [])}
+    if not ai.enabled or not slots:
+        return by_topic
+    edition = f"{bnow.date().isoformat()}-{slots[-1]:02d}"
+    gcache = state.setdefault("gnews", {})
+    todo = [c for c in cfg["categories"] if (by_topic.get(c["id"]) or {}).get("edition") != edition]
+    if os.environ.get("EXTRA_FORCE_DOSSIERS") == "1":
+        todo = list(cfg["categories"])
+    tries = state.setdefault("dossierTries", {})
+    for k in [k for k in tries if not k.startswith(edition)]:
+        tries.pop(k, None)
+    done = 0
+    for c in todo:
+        if done >= int(a.get("dossiersPerRun", 3)):
+            break
+        if not (ai.usable(ai.dossier_model) or ai.usable(ai.model)):
+            break
+        key = f"{edition}:{c['id']}"
+        if tries.get(key, 0) >= 2:  # nach zwei Fehlversuchen bis zur nächsten Ausgabe pausieren
+            continue
+        if sum(1 for x in items if c["id"] in x["cats"]) < 3:
+            continue
+        tries[key] = tries.get(key, 0) + 1
+        done += 1
+        d = build_dossier(ai, c, items, markets, cfg, gcache)
+        if d:
+            d["edition"] = edition
+            by_topic[c["id"]] = d
+        time.sleep(5)
+    # Zwischenspeicher begrenzen
+    if len(gcache) > 4000:
+        for k in list(gcache)[:-3000]:
+            gcache.pop(k, None)
+    return by_topic
+
+
 # ----------------------------------------------------------------------------- Hauptablauf
 def load_prev(name):
     base = os.environ.get("PREV_URL", "").rstrip("/")
@@ -612,6 +884,7 @@ def main():
     prev_news = load_prev("news.json") or {}
     state = load_prev("state.json") or {}
     prev_brief = load_prev("briefing.json")
+    prev_dos = load_prev("dossiers.json")
     prev_ai = {x["id"]: x["ai"] for x in prev_news.get("items", []) if x.get("ai")}
     prev_items = prev_news.get("items", [])
 
@@ -633,7 +906,7 @@ def main():
     for p in prev_items:
         d = parse_date(p.get("published"))
         if d and NOW - d <= max_age:
-            base = {k: p[k] for k in ("title", "link", "source", "published", "teaser", "lang", "feed") if k in p}
+            base = {k: p[k] for k in ("title", "link", "url", "source", "published", "teaser", "lang", "feed") if k in p}
             for c in p.get("cats", [p.get("cat")]):
                 if c:
                     fresh.append({**base, "cat": c})
@@ -660,9 +933,14 @@ def main():
     # 3) KI
     ai = AI(cfg, state)
     n_ai = ai_articles(ai, items, cfg)
-    log(f"KI-Auswertungen in diesem Lauf: {n_ai} (KI {'aktiv' if ai.enabled else 'aus: ' + str(ai.disabled_reason)})")
+    log(f"KI-Auswertungen in diesem Lauf: {n_ai} (KI {'aktiv' if ai.active else 'aus: ' + str(ai.disabled_reason)})")
     for it in items:
         it["score"] = score(it)
+
+    # 3b) Themen-Dossiers
+    dossiers = run_dossiers(ai, items, markets, cfg, state, prev_dos)
+    order = [c["id"] for c in cfg["categories"]]
+    dossier_list = sorted(dossiers.values(), key=lambda d: order.index(d["topic"]) if d["topic"] in order else 99)
 
     # 4) Morgenbericht – einmal täglich ab der eingestellten Stunde (deutsche Zeit) per KI,
     #    sonst automatisch zusammengestellt
@@ -694,7 +972,9 @@ def main():
 
     meta = {
         "updated": NOW.isoformat(timespec="seconds"),
-        "ai": {"enabled": ai.enabled, "reason": ai.disabled_reason, "model": ai.model if ai.key else None,
+        "ai": {"enabled": ai.active, "reason": ai.disabled_reason, "model": ai.model if ai.key else None,
+               "dossierModel": ai.dossier_model if ai.key else None, "blocked": ai.blocked,
+               "byModel": state.get("aiByModel", {}),
                "callsToday": state.get("aiCalls", 0), "maxPerDay": ai.max_day},
     }
     def dump(name, obj):
@@ -703,6 +983,7 @@ def main():
     dump("news.json", {**meta, "categories": cfg["categories"], "items": keep})
     dump("markets.json", {**meta, "markets": markets})
     dump("briefing.json", briefing)
+    dump("dossiers.json", {"updated": meta["updated"], "items": dossier_list})
     dump("state.json", {**state, "updated": meta["updated"]})
     dump("status.json", {**meta, "feeds": feed_status, "itemCount": len(keep),
                          "marketsOk": sum(1 for m in markets if m.get("ok")), "log": LOG[-80:]})

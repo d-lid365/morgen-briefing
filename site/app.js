@@ -9,7 +9,8 @@
   };
   const S = {
     view: "briefing",
-    news: null, markets: null, briefing: null, status: null,
+    news: null, markets: null, briefing: null, status: null, dossiers: null,
+    reading: null,
     cat: LS.get("cat", "all"),
     sort: LS.get("sort", "top"),
     q: "",
@@ -70,11 +71,12 @@
     const btn = $("#refreshBtn");
     btn.classList.add("spin");
     try {
-      const [n, m, b, s] = await Promise.allSettled([getJSON("news.json"), getJSON("markets.json"), getJSON("briefing.json"), getJSON("status.json")]);
+      const [n, m, b, s, d] = await Promise.allSettled([getJSON("news.json"), getJSON("markets.json"), getJSON("briefing.json"), getJSON("status.json"), getJSON("dossiers.json")]);
       if (n.status === "fulfilled") S.news = n.value;
       if (m.status === "fulfilled") S.markets = m.value;
       if (b.status === "fulfilled") S.briefing = b.value;
       if (s.status === "fulfilled") S.status = s.value;
+      if (d.status === "fulfilled") S.dossiers = d.value;
       if (n.status !== "fulfilled" && !silent) toast("Keine Verbindung – zeige gespeicherten Stand.");
     } finally {
       btn.classList.remove("spin");
@@ -140,17 +142,17 @@
   $("#refreshBtn").addEventListener("click", refresh);
 
   // ------------------------------------------------------------------ Navigation
-  const titles = { briefing: "Briefing", news: "Nachrichten", markets: "Märkte", saved: "Merkliste", settings: "Mehr" };
+  const titles = { briefing: "Briefing", dossiers: "Dossiers", news: "Nachrichten", markets: "Märkte", saved: "Merkliste", settings: "Mehr" };
   $("#tabbar").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-view]"); if (!b) return;
-    S.view = b.dataset.view;
+    S.view = b.dataset.view; S.reading = null;
     document.querySelectorAll("#tabbar button").forEach((x) => x.classList.toggle("on", x === b));
     render(); window.scrollTo({ top: 0 });
   });
 
   function render() {
     $("#viewTitle").textContent = S.view === "briefing" ? greeting() : titles[S.view];
-    ({ briefing: viewBriefing, news: viewNews, markets: viewMarkets, saved: viewSaved, settings: viewSettings }[S.view])();
+    ({ briefing: viewBriefing, dossiers: viewDossiers, news: viewNews, markets: viewMarkets, saved: viewSaved, settings: viewSettings }[S.view])();
   }
   function greeting() {
     const h = new Date().getHours();
@@ -204,7 +206,7 @@
     if (it.also && it.also.length) h += `<div class="also">Auch berichtet von: ${it.also.map((a) => `<a href="${esc(safeUrl(a.link))}" target="_blank" rel="noopener">${esc(a.source)}</a>`).join(", ")}</div>`;
     const sv = !!S.saved[it.id];
     h += `<div class="actions">
-      <a class="btn primary" href="${esc(safeUrl(it.link))}" target="_blank" rel="noopener">Artikel lesen ↗</a>
+      <a class="btn primary" href="${esc(safeUrl(it.url || it.link))}" target="_blank" rel="noopener">Artikel lesen ↗</a>
       <button class="btn${sv ? " saved" : ""}" data-act="save">${sv ? "Gemerkt ✓" : "Merken"}</button>
       ${navigator.share ? '<button class="btn" data-act="share">Teilen</button>' : ""}
     </div>
@@ -225,7 +227,7 @@
       LS.set("saved", S.saved);
       const a2 = main.querySelector(`.art[data-id="${CSS.escape(id)}"]`); if (a2) a2.outerHTML = card(byId(id));
     } else if (act === "share" && id) {
-      const it = byId(id); navigator.share({ title: it.title, url: it.link }).catch(() => {});
+      const it = byId(id); navigator.share({ title: it.title, url: it.url || it.link }).catch(() => {});
     } else if (act === "cat") {
       S.cat = b.dataset.cat; LS.set("cat", S.cat); viewNews();
     } else if (act === "sort") {
@@ -234,6 +236,10 @@
       S.cat = b.dataset.cat; LS.set("cat", S.cat); S.view = "news";
       document.querySelectorAll("#tabbar button").forEach((x) => x.classList.toggle("on", x.dataset.view === "news"));
       render(); window.scrollTo({ top: 0 });
+    } else if (act === "dossier") {
+      openDossier(b.dataset.topic);
+    } else if (act === "dback") {
+      S.reading = null; S.view = "dossiers"; render(); window.scrollTo({ top: S._dScroll || 0 });
     } else if (act === "allread") {
       listed().forEach((x) => S.read.add(x.id)); saveRead(); viewNews();
     }
@@ -258,6 +264,7 @@
         ${b.maerkte ? `<p class="mk">${esc(b.maerkte)}</p>` : ""}
         ${tickStrip()}
       </section>`;
+      h += dossierStrip();
       if (b.beobachten && b.beobachten.length) {
         h += `<div class="section-h">Worauf heute zu achten ist</div><div class="sec"><ul class="watch">${b.beobachten.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`;
       }
@@ -327,6 +334,97 @@
     q.addEventListener("input", () => { S.q = q.value; clearTimeout(viewNews._t); viewNews._t = setTimeout(() => { const pos = q.selectionStart; viewNews(); const q2 = $("#q"); q2.focus(); q2.setSelectionRange(pos, pos); }, 250); });
   }
 
+
+  // ------------------------------------------------------------------ Ansicht: Dossiers
+  function dossierItems() { return ((S.dossiers && S.dossiers.items) || []).filter((d) => !S.hiddenCats.has(d.topic)); }
+  const readMin = (w) => Math.max(1, Math.round((w || 0) / 220));
+  function dossierStrip() {
+    const ds = dossierItems();
+    if (!ds.length) return "";
+    return `<div class="section-h">Dossiers des Tages <small>ausführlich aufbereitet</small></div><div class="dlinks">${ds.map((d) => `
+      <button class="dlink" data-act="dossier" data-topic="${esc(d.topic)}"><div class="eyebrow">${esc(catName(d.topic))}</div><b>${esc(d.title)}</b><span>${readMin(d.words)} Min. Lesezeit · ${esc(ago(d.at))}</span></button>`).join("")}</div>`;
+  }
+  function openDossier(topic) {
+    S._dScroll = window.scrollY; S.reading = topic; S.view = "dossiers";
+    document.querySelectorAll("#tabbar button").forEach((x) => x.classList.toggle("on", x.dataset.view === "dossiers"));
+    render(); window.scrollTo({ top: 0 });
+    const done = LS.get("dossierRead", {}); const d = dossierItems().find((x) => x.topic === topic);
+    if (d) { done[topic] = d.at; LS.set("dossierRead", done); }
+  }
+  function viewDossiers() {
+    if (S.reading) return viewReader();
+    const ds = dossierItems(), cats = ((S.news && S.news.categories) || []).filter((c) => !S.hiddenCats.has(c.id));
+    const done = LS.get("dossierRead", {});
+    let h = `<p class="muted" style="font-size:.8em;margin:0 2px 14px">Jeden Morgen schreibt die KI zu jedem Thema einen eigenen Fachartikel aus allen verfügbaren Meldungen (Volltexte, soweit frei zugänglich) und Hintergrundwissen aus Wikipedia – mit Quellenangaben.</p>`;
+    const byT = Object.fromEntries(ds.map((d) => [d.topic, d]));
+    (cats.length ? cats : ds.map((d) => ({ id: d.topic, name: d.name }))).forEach((c) => {
+      const d = byT[c.id];
+      if (!d) { h += `<div class="dcard missing"><div class="eyebrow">${esc(c.name)}</div><p>Noch kein Dossier – es entsteht beim nächsten Morgenlauf${S.status && S.status.ai && !S.status.ai.enabled ? " (KI-Schlüssel erforderlich)" : ""}.</p></div>`; return; }
+      const isNew = done[d.topic] !== d.at;
+      h += `<button class="dcard" data-act="dossier" data-topic="${esc(d.topic)}">
+        <div class="eyebrow">${isNew ? '<span class="dot" style="margin-right:6px"></span>' : ""}${esc(c.name)}</div>
+        <h3>${esc(d.title)}</h3>${d.lead ? `<p>${esc(d.lead)}</p>` : ""}
+        <div class="dmeta"><span>${readMin(d.words)} Min. Lesezeit</span><span>${(d.words || 0).toLocaleString("de-DE")} Wörter</span><span>${(d.sources || []).length} Quellen</span><span>${esc(ago(d.at))}</span></div></button>`;
+    });
+    main.innerHTML = h;
+  }
+  function inlineMd(t) {
+    return esc(t)
+      .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+      .replace(/(^|[\s(])\*(?!\s)(.+?)\*(?=[\s).,;:!?]|$)/g, "$1<i>$2</i>")
+      .replace(/\[(W?)(\d{1,3})\]/g, (m, w, n) => `<a class="ref" href="#${w ? "wiki" : "src"}-${n}" data-ref="${w ? "wiki" : "src"}-${n}">${w}${n}</a>`);
+  }
+  function mdToHtml(md, toc) {
+    const lines = String(md || "").split(/\r?\n/);
+    let out = "", para = [], list = null;
+    const flushP = () => { if (para.length) { out += `<p>${inlineMd(para.join(" "))}</p>`; para = []; } };
+    const flushL = () => { if (list) { out += `</${list}>`; list = null; } };
+    lines.forEach((raw) => {
+      const ln = raw.trim();
+      let m;
+      if (!ln) { flushP(); flushL(); return; }
+      if ((m = ln.match(/^#{1,2}\s+(.*)$/))) { flushP(); flushL(); const id = "k" + toc.length; toc.push({ id, t: m[1] }); out += `<h2 id="${id}">${inlineMd(m[1])}</h2>`; return; }
+      if ((m = ln.match(/^#{3,6}\s+(.*)$/))) { flushP(); flushL(); out += `<h3>${inlineMd(m[1])}</h3>`; return; }
+      if ((m = ln.match(/^[-*•]\s+(.*)$/))) { flushP(); if (list !== "ul") { flushL(); out += "<ul>"; list = "ul"; } out += `<li>${inlineMd(m[1])}</li>`; return; }
+      if ((m = ln.match(/^\d+[.)]\s+(.*)$/))) { flushP(); if (list !== "ol") { flushL(); out += "<ol>"; list = "ol"; } out += `<li>${inlineMd(m[1])}</li>`; return; }
+      if ((m = ln.match(/^>\s?(.*)$/))) { flushP(); flushL(); out += `<blockquote>${inlineMd(m[1])}</blockquote>`; return; }
+      flushL(); para.push(ln);
+    });
+    flushP(); flushL();
+    return out;
+  }
+  function viewReader() {
+    const d = dossierItems().find((x) => x.topic === S.reading);
+    if (!d) { S.reading = null; return viewDossiers(); }
+    $("#viewTitle").textContent = "Dossier";
+    const toc = [], body = mdToHtml(d.body, toc);
+    const when = new Date(d.at).toLocaleString("de-DE", { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
+    let h = `<button class="back" data-act="dback">‹ Alle Dossiers</button><article class="reader">
+      <div class="eyebrow" style="color:var(--accent)">${esc(catName(d.topic))}</div>
+      <h1>${esc(d.title)}</h1>${d.lead ? `<p class="lead">${esc(d.lead)}</p>` : ""}
+      <div class="dmeta"><span>${esc(when)} Uhr</span><span>${readMin(d.words)} Min. Lesezeit</span><span>${(d.words || 0).toLocaleString("de-DE")} Wörter</span>
+        <span>Basis: ${d.basis ? d.basis.articles + " Meldungen, " + d.basis.fulltext + " im Volltext" : "–"}</span></div>`;
+    if (toc.length > 2) h += `<nav class="toc"><b>Inhalt</b><ol>${toc.map((t) => `<li><a href="#${t.id}" data-jump="${t.id}">${esc(t.t)}</a></li>`).join("")}</ol></nav>`;
+    h += `<div class="prose">${body}</div><section class="srcs"><h2>Quellen</h2><ol>`;
+    (d.sources || []).forEach((s) => {
+      h += `<li id="src-${s.n}" value="${s.n}"><a href="${esc(safeUrl(s.url))}" target="_blank" rel="noopener">${esc(s.title)}</a> – ${esc(s.source)}, ${esc(new Date(s.published).toLocaleDateString("de-DE"))}${s.full ? "" : " <span class=\"muted\">(Anriss)</span>"}</li>`;
+    });
+    h += `</ol>`;
+    if (d.wiki && d.wiki.length) {
+      h += `<h2 style="margin-top:18px">Hintergrund (Wikipedia)</h2><ol>${d.wiki.map((w) => `<li id="wiki-${w.n}" value="${w.n}">W${w.n}: <a href="${esc(safeUrl(w.url))}" target="_blank" rel="noopener">${esc(w.title)}</a></li>`).join("")}</ol>`;
+    }
+    h += `</section><p class="note">Von der KI (${esc(d.model || "")}) aus den genannten Quellen erstellt. Zahlen und Aussagen bitte im Zweifel in der Originalquelle prüfen. Keine Anlageberatung.</p></article>
+      <div style="margin-top:14px"><button class="back" data-act="dback">‹ Alle Dossiers</button></div>`;
+    main.innerHTML = h;
+    main.querySelectorAll("[data-jump],a.ref").forEach((a) => a.addEventListener("click", (e) => {
+      e.preventDefault();
+      const id = a.dataset.jump || a.dataset.ref, el = document.getElementById(id);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (el.tagName === "LI") { el.classList.add("hl"); setTimeout(() => el.classList.remove("hl"), 2200); }
+    }));
+  }
+
   // ------------------------------------------------------------------ Ansicht: Märkte
   function spark(arr, up) {
     if (!arr || arr.length < 2) return "";
@@ -383,7 +481,9 @@
       <div class="row"><span>Letzter Abruf</span><span>${st ? esc(ago(st.updated)) : "–"}</span></div>
       <div class="row"><span>Meldungen</span><span>${st ? st.itemCount : "–"}</span></div>
       <div class="row"><span>KI-Auswertung</span><span class="${ai.enabled ? "ok" : "err"}">${ai.enabled ? "aktiv (" + esc(ai.model) + ")" : "aus" + (ai.reason ? " – " + esc(ai.reason) : "")}</span></div>
-      <div class="row"><span>KI-Aufrufe heute</span><span>${ai.callsToday != null ? ai.callsToday + " / " + ai.maxPerDay : "–"}</span></div>
+      <div class="row"><span>KI-Aufrufe heute</span><span>${ai.byModel && Object.keys(ai.byModel).length ? Object.entries(ai.byModel).map(([k, v]) => esc(k) + ": " + v).join("<br>") : "0"}</span></div>
+      ${ai.blocked && Object.keys(ai.blocked).length ? `<div class="row"><span>Hinweis</span><span class="err" style="text-align:right">${Object.entries(ai.blocked).map(([k, v]) => esc(k) + ": " + esc(v)).join("<br>")}</span></div>` : ""}
+      <div class="row"><span>Dossiers</span><span>${S.dossiers ? S.dossiers.items.length + " von " + ((S.news && S.news.categories) || []).length : "–"}</span></div>
       <details><summary>Nachrichtenquellen (${st && st.feeds ? st.feeds.filter((f) => f.ok).length + " von " + st.feeds.length + " erreichbar" : "–"})</summary>
         ${((st && st.feeds) || []).map((f) => `<div class="feedrow"><span>${esc(f.feed)}<br><span class="muted">${esc(catName(f.cat))}</span></span><span class="${f.ok ? "ok" : "err"}">${f.ok ? f.count + " ✓" : "Fehler"}</span></div>`).join("")}
       </details>

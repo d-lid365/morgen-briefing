@@ -308,7 +308,13 @@ def cluster(items):
         hit = None
         for c in out[-400:]:
             ct = c["_tok"]
-            if tok and ct and len(tok & ct) / max(1, len(tok | ct)) >= 0.55:
+            if not tok or not ct:
+                continue
+            inter = len(tok & ct)
+            jac = inter / max(1, len(tok | ct))
+            overlap = inter / max(1, min(len(tok), len(ct)))
+            # gleicher Titel (fast) – oder gleiche Meldung anders formuliert aus einer ANDEREN Quelle
+            if jac >= 0.55 or (inter >= 4 and overlap >= 0.7 and it["source"] != c["source"]):
                 hit = c
                 break
         if hit:
@@ -531,9 +537,10 @@ def rule_briefing(items, markets, cfg):
         g = [m for m in ok if m["group"] == grp and "VIX" not in m["name"]]
         if g:
             mk.append(f"{grp}: " + ", ".join(f"{m['name']} {m['chgPct']:+.1f} %".replace(".", ",") for m in g))
-    sections = []
+    sections, used = [], set()
     for cid, cname in cats.items():
-        its = [x for x in top if cid in x["cats"]][:3]
+        its = [x for x in top if cid in x["cats"] and x["id"] not in used][:3]
+        used.update(x["id"] for x in its)
         if its:
             sections.append({"kategorie": cid, "text": " · ".join(x["title"] for x in its), "ids": [x["id"] for x in its]})
     return {

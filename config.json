@@ -2,6 +2,16 @@
  "_hinweis": "Diese Datei steuert, welche Nachrichtenquellen und Marktdaten der Automatik-Job holt. Änderungen hier wirken beim nächsten Lauf.",
  "markets": [
   {
+   "sym": "URTH",
+   "name": "MSCI World (ETF, USD)",
+   "group": "Welt"
+  },
+  {
+   "sym": "EUNL.DE",
+   "name": "MSCI World (iShares, EUR)",
+   "group": "Welt"
+  },
+  {
    "sym": "^GDAXI",
    "name": "DAX",
    "group": "Europa"
@@ -29,6 +39,11 @@
   {
    "sym": "^NDX",
    "name": "Nasdaq 100",
+   "group": "USA"
+  },
+  {
+   "sym": "^IXIC",
+   "name": "Nasdaq Composite",
    "group": "USA"
   },
   {
@@ -98,6 +113,10 @@
    "name": "Märkte & Börse"
   },
   {
+   "id": "indizes",
+   "name": "Indizes: Nasdaq & MSCI World"
+  },
+  {
    "id": "politik",
    "name": "Politik & Wirtschaftspolitik"
   },
@@ -153,6 +172,30 @@
    "cat": "maerkte",
    "name": "Google News",
    "q": "stock market Wall Street",
+   "lang": "en"
+  },
+  {
+   "cat": "indizes",
+   "name": "Google News",
+   "q": "Nasdaq 100",
+   "lang": "de"
+  },
+  {
+   "cat": "indizes",
+   "name": "Google News",
+   "q": "MSCI World",
+   "lang": "de"
+  },
+  {
+   "cat": "indizes",
+   "name": "Google News",
+   "q": "Nasdaq Composite index",
+   "lang": "en"
+  },
+  {
+   "cat": "indizes",
+   "name": "Google News",
+   "q": "MSCI World index",
    "lang": "en"
   },
   {
@@ -302,13 +345,77 @@
  "newsMaxAgeHours": 72,
  "newsPerCategory": 60,
  "ai": {
-  "_hinweis": "KI-Auswertung. Läuft nur, wenn im GitHub-Repository ein Secret AI_API_KEY hinterlegt ist. Standard: Google Gemini (kostenloser Schlüssel aus Google AI Studio).",
+  "_hinweis": "KI-Auswertung. Läuft nur, wenn im GitHub-Repository ein Secret AI_API_KEY hinterlegt ist. Standard: Google Gemini (kostenloser Schlüssel aus Google AI Studio). Für die langen Themen-Dossiers wird ein stärkeres Modell genutzt; ist dessen Kontingent erschöpft, springt automatisch das Standardmodell ein.",
   "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
   "model": "gemini-2.5-flash-lite",
   "maxCallsPerDay": 40,
   "maxArticlesPerRun": 32,
   "articlesPerCall": 8,
   "fetchFullText": true,
-  "briefingHourBerlin": 5
+  "briefingHourBerlin": 5,
+  "dossierModel": "gemini-2.5-flash",
+  "dossierHoursBerlin": [
+   4
+  ],
+  "dossiersPerRun": 2,
+  "dossierMaxCallsPerDay": 12,
+  "dossierArticles": 25,
+  "dossierMoreHeadlines": 40,
+  "dossierFulltextChars": 7000
+ },
+ "dossierWiki": {
+  "maerkte": [
+   "Deutscher Aktienindex",
+   "S&P 500",
+   "Börse",
+   "Volatilität"
+  ],
+  "indizes": [
+   "Nasdaq-100",
+   "NASDAQ Composite",
+   "MSCI World",
+   "Exchange-traded Fund",
+   "Marktkapitalisierung"
+  ],
+  "politik": [
+   "Wirtschaftspolitik",
+   "Schuldenbremse",
+   "Zoll",
+   "Fiskalpolitik"
+  ],
+  "geld": [
+   "Europäische Zentralbank",
+   "Federal Reserve System",
+   "Leitzins",
+   "Inflation",
+   "Konjunktur"
+  ],
+  "bewertung": [
+   "Immobilienwertermittlungsverordnung",
+   "Verkehrswert",
+   "Bodenrichtwert",
+   "Gutachterausschuss",
+   "Ertragswertverfahren",
+   "Sachwertverfahren",
+   "Vergleichswertverfahren"
+  ],
+  "immo_de": [
+   "Immobilienmarkt",
+   "Mietpreisbremse",
+   "Baufinanzierung",
+   "Wohnungsbau"
+  ],
+  "immo_int": [
+   "Gewerbeimmobilie",
+   "Immobilienblase",
+   "Real Estate Investment Trust"
+  ],
+  "immo_am": [
+   "Asset Management",
+   "Offener Immobilienfonds",
+   "Real Estate Investment Trust",
+   "Kapitalverwaltungsgesellschaft",
+   "Property Management"
+  ]
  }
 }

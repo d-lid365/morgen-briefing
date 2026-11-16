@@ -346,43 +346,153 @@ def score(it):
 
 
 # ----------------------------------------------------------------------------- Märkte
-def load_markets(cfg):
-    out = []
+CNBC_MAP = {"^GDAXI": ".GDAXI", "^MDAXI": ".MDAXI", "^STOXX50E": ".STOXX50E", "^FTSE": ".FTSE", "^GSPC": ".SPX",
+            "^NDX": ".NDX", "^IXIC": ".IXIC", "^DJI": ".DJI", "^VIX": ".VIX", "ES=F": "@SP.1", "NQ=F": "@ND.1",
+            "^N225": ".N225", "^HSI": ".HSI", "000001.SS": ".SSEC", "EURUSD=X": "EUR=", "GC=F": "@GC.1",
+            "BZ=F": "@LCO.1", "^TNX": "US10Y", "BTC-EUR": "BTC.CB=", "URTH": "URTH", "EUNL.DE": "EUNL-DE"}
 
-    def one(m):
-        sym = m["sym"]
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(sym)}?range=1mo&interval=1d"
+
+class Yahoo:
+    """Yahoo Finance mit Browser-Cookie und 'Crumb' – ohne das blockt Yahoo Server-Anfragen oft mit HTTP 429."""
+
+    def __init__(self):
+        import http.cookiejar
+        self.jar = http.cookiejar.CookieJar()
+        self.op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
+        self.op.addheaders = [("User-Agent", UA), ("Accept", "*/*"), ("Accept-Language", "de-DE,de;q=0.9,en;q=0.8")]
+        self.crumb = None
+        for url in ("https://fc.yahoo.com", "https://finance.yahoo.com/"):
+            try:
+                self.op.open(url, timeout=15).read(200)
+            except Exception:
+                pass  # fc.yahoo.com antwortet absichtlich mit 404, setzt aber das Cookie
         try:
-            j = http_json(url)
-            r = j["chart"]["result"][0]
-            meta = r["meta"]
-            ts = r.get("timestamp") or []
-            closes = (r.get("indicators", {}).get("quote") or [{}])[0].get("close") or []
-            pts = [(t, c) for t, c in zip(ts, closes) if c is not None]
-            price = meta.get("regularMarketPrice") or (pts[-1][1] if pts else None)
-            mtime = meta.get("regularMarketTime") or (pts[-1][0] if pts else None)
-            prev = None
-            if pts:
-                last_day = dt.datetime.fromtimestamp(pts[-1][0], dt.timezone.utc).date()
-                mday = dt.datetime.fromtimestamp(mtime, dt.timezone.utc).date() if mtime else last_day
-                if last_day == mday and len(pts) > 1:
-                    prev = pts[-2][1]
-                else:
-                    prev = pts[-1][1]
-            first = pts[0][1] if pts else None
-            return {**m, "price": price, "prev": prev,
-                    "chgPct": round((price / prev - 1) * 100, 2) if price and prev else None,
-                    "chg1mPct": round((price / first - 1) * 100, 2) if price and first else None,
-                    "currency": meta.get("currency"), "time": mtime,
-                    "spark": [round(c, 4) for _, c in pts][-23:], "ok": True}
+            c = self.op.open("https://query2.finance.yahoo.com/v1/test/getcrumb", timeout=15).read().decode().strip()
+            if c and "<" not in c and len(c) < 40:
+                self.crumb = c
         except Exception as e:
-            return {**m, "ok": False, "error": str(e)[:120]}
+            log(f"Yahoo-Crumb nicht erhalten: {str(e)[:80]}")
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        for res in ex.map(one, cfg["markets"]):
-            out.append(res)
-            log(f"Markt {res['name']}: {'OK' if res['ok'] else 'FEHLER ' + res.get('error', '')}")
+    def chart(self, sym):
+        last = None
+        for host in ("query2", "query1"):
+            url = f"https://{host}.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(sym)}?range=1mo&interval=1d"
+            if self.crumb:
+                url += "&crumb=" + urllib.parse.quote(self.crumb)
+            for attempt in range(2):
+                try:
+                    with self.op.open(url, timeout=20) as r:
+                        return json.loads(r.read().decode())
+                except urllib.error.HTTPError as e:
+                    last = e
+                    if e.code == 429:
+                        time.sleep(3 + 4 * attempt)
+                        continue
+                    break
+                except Exception as e:
+                    last = e
+                    break
+        raise last
+
+
+def parse_yahoo(m, j):
+    r = j["chart"]["result"][0]
+    meta = r["meta"]
+    ts = r.get("timestamp") or []
+    closes = (r.get("indicators", {}).get("quote") or [{}])[0].get("close") or []
+    pts = [(t, c) for t, c in zip(ts, closes) if c is not None]
+    price = meta.get("regularMarketPrice") or (pts[-1][1] if pts else None)
+    mtime = meta.get("regularMarketTime") or (pts[-1][0] if pts else None)
+    prev = None
+    if pts:
+        last_day = dt.datetime.fromtimestamp(pts[-1][0], dt.timezone.utc).date()
+        mday = dt.datetime.fromtimestamp(mtime, dt.timezone.utc).date() if mtime else last_day
+        prev = pts[-2][1] if (last_day == mday and len(pts) > 1) else pts[-1][1]
+    first = pts[0][1] if pts else None
+    return {**m, "price": price, "prev": prev,
+            "chgPct": round((price / prev - 1) * 100, 2) if price and prev else None,
+            "chg1mPct": round((price / first - 1) * 100, 2) if price and first else None,
+            "currency": meta.get("currency"), "time": mtime,
+            "spark": [round(c, 4) for _, c in pts][-23:], "ok": True, "src": "Yahoo Finance"}
+
+
+def cnbc_quotes(syms):
+    """Ersatzquelle ohne Schlüssel (CNBC-Kursdienst)."""
+    out = {}
+    if not syms:
+        return out
+    q = "|".join(syms)
+    url = ("https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol?symbols="
+           + urllib.parse.quote(q, safe="|") + "&requestMethod=itv&noform=1&partnerId=2&fund=1&exthrs=1&output=json&events=1")
+    try:
+        j = http_json(url, timeout=20)
+        res = (j.get("FormattedQuoteResult") or {}).get("FormattedQuote") or []
+        if isinstance(res, dict):
+            res = [res]
+        num = lambda v: float(str(v).replace(",", "").replace("%", "").replace("+", "")) if v not in (None, "", "UNCH") else None
+        for x in res:
+            try:
+                price = num(x.get("last"))
+                prev = num(x.get("previous_day_closing"))
+                pct = num(x.get("change_pct"))
+                if price is None:
+                    continue
+                if pct is None and prev:
+                    pct = (price / prev - 1) * 100
+                out[x.get("symbol")] = {"price": price, "prev": prev, "chgPct": round(pct, 2) if pct is not None else None,
+                                        "currency": x.get("currencyCode"), "time": int(NOW.timestamp())}
+            except Exception:
+                continue
+    except Exception as e:
+        log(f"CNBC-Kurse nicht abrufbar: {str(e)[:100]}")
     return out
+
+
+def load_markets(cfg, prev=None):
+    prev_by = {m["sym"]: m for m in (prev or {}).get("markets", []) if m.get("ok") and m.get("price") is not None}
+    out = {}
+    try:
+        yh = Yahoo()
+    except Exception as e:
+        yh = None
+        log(f"Yahoo nicht erreichbar: {e}")
+    if yh:
+        for m in cfg["markets"]:
+            try:
+                out[m["sym"]] = parse_yahoo(m, yh.chart(m["sym"]))
+            except Exception as e:
+                out[m["sym"]] = {**m, "ok": False, "error": str(e)[:120]}
+            time.sleep(0.4)
+    # Ersatz: CNBC
+    missing = [m for m in cfg["markets"] if not (out.get(m["sym"]) or {}).get("ok")]
+    cmap = {m["sym"]: (m.get("cnbc") or CNBC_MAP.get(m["sym"])) for m in missing}
+    cq = cnbc_quotes([c for c in cmap.values() if c])
+    for m in missing:
+        q = cq.get(cmap.get(m["sym"]))
+        if q:
+            old = prev_by.get(m["sym"], {})
+            spark = list(old.get("spark") or [])
+            # Verlauf weiterführen: einen Punkt pro Tag
+            if not spark or old.get("sparkDay") != NOW.date().isoformat():
+                spark.append(q["price"])
+            else:
+                spark[-1] = q["price"]
+            spark = spark[-23:]
+            out[m["sym"]] = {**m, **q, "spark": spark, "sparkDay": NOW.date().isoformat(),
+                             "chg1mPct": round((q["price"] / spark[0] - 1) * 100, 2) if len(spark) > 5 and spark[0] else old.get("chg1mPct"),
+                             "ok": True, "src": "CNBC"}
+    # letzter Ausweg: letzte bekannte Werte weiter anzeigen
+    for m in cfg["markets"]:
+        if not (out.get(m["sym"]) or {}).get("ok") and m["sym"] in prev_by:
+            out[m["sym"]] = {**prev_by[m["sym"]], **m, "stale": True}
+    res = []
+    for m in cfg["markets"]:
+        r = out.get(m["sym"]) or {**m, "ok": False, "error": "keine Quelle"}
+        if r.get("ok") and not r.get("stale"):
+            r.pop("stale", None)
+        res.append(r)
+        log(f"Markt {m['name']}: {('OK ' + r.get('src', '') + (' (alter Stand)' if r.get('stale') else '')) if r.get('ok') else 'FEHLER ' + r.get('error', '')}")
+    return res
 
 
 def fmt_num(v, dec=2):
@@ -425,52 +535,71 @@ class AI:
         return self.enabled and model not in self.blocked and self.budget(model) > 0
 
     def chat(self, system, user, max_tokens=4000, model=None, timeout=120):
+        """Ein KI-Aufruf. Bei Überlastung (503/500/Zeitüberschreitung) wird bis zu 3-mal mit Pause wiederholt.
+        Nur erfolgreiche Aufrufe zählen gegen das Tageslimit."""
         model = model or self.model
         if not self.usable(model):
             return None
+        self.last_error = None
         body = json.dumps({"model": model, "temperature": 0.25, "max_tokens": max_tokens,
                            "messages": [{"role": "system", "content": system},
                                         {"role": "user", "content": user}]}).encode()
-        req = urllib.request.Request(self.url, data=body, method="POST", headers={
-            "Content-Type": "application/json", "Authorization": f"Bearer {self.key}"})
-        self.state["aiByModel"][model] = self.used(model) + 1
-        self.state["aiCalls"] = self.state.get("aiCalls", 0) + 1
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                j = json.loads(r.read().decode())
-            self.last_model = model
-            return j["choices"][0]["message"]["content"]
-        except urllib.error.HTTPError as e:
-            msg = e.read().decode("utf-8", "replace")[:300]
-            log(f"KI-Fehler HTTP {e.code} ({model}): {msg}")
-            if e.code in (401, 403):
-                self.enabled, self.disabled_reason = False, f"Schlüssel abgelehnt (HTTP {e.code})"
-            elif e.code == 429:
-                self.blocked[model] = "Kontingent erreicht (HTTP 429)"
-                if model == self.model:
-                    self.disabled_reason = "Tageskontingent der KI erreicht (HTTP 429)"
-            elif e.code == 404:
-                repl = self.replacement(model, msg)
-                if repl and repl != model and not getattr(self, "_retrying", False):
-                    log(f"Modell {model} nicht verfügbar – wechsle zu {repl}")
-                    self.state["aiByModel"][model] = max(0, self.used(model) - 1)
-                    self.state["aiCalls"] = max(0, self.state.get("aiCalls", 1) - 1)
+        for attempt in range(4):
+            req = urllib.request.Request(self.url, data=body, method="POST", headers={
+                "Content-Type": "application/json", "Authorization": f"Bearer {self.key}"})
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    j = json.loads(r.read().decode())
+                self.state["aiByModel"][model] = self.used(model) + 1
+                self.state["aiCalls"] = self.state.get("aiCalls", 0) + 1
+                self.last_model = model
+                ch = j["choices"][0]
+                if ch.get("finish_reason") == "length":
+                    log(f"Hinweis: Antwort von {model} wurde wegen Längenbegrenzung abgeschnitten")
+                return ch["message"]["content"]
+            except urllib.error.HTTPError as e:
+                msg = e.read().decode("utf-8", "replace")[:300]
+                self.last_error = f"HTTP {e.code}"
+                if e.code in (500, 502, 503, 504) and attempt < 3:
+                    wait = (15, 40, 90)[attempt]
+                    log(f"KI {model} überlastet (HTTP {e.code}) – neuer Versuch in {wait} s")
+                    time.sleep(wait)
+                    continue
+                log(f"KI-Fehler HTTP {e.code} ({model}): {msg}")
+                if e.code in (401, 403):
+                    self.enabled, self.disabled_reason = False, f"Schlüssel abgelehnt (HTTP {e.code})"
+                elif e.code == 429:
+                    self.blocked[model] = "Kontingent erreicht (HTTP 429)"
                     if model == self.model:
-                        self.model = repl
-                    if model == self.dossier_model:
-                        self.dossier_model = repl
-                    self._retrying = True
-                    try:
-                        return self.chat(system, user, max_tokens, repl, timeout)
-                    finally:
-                        self._retrying = False
-                self.blocked[model] = "Modell nicht gefunden (HTTP 404)"
-                if model == self.model:
-                    self.disabled_reason = f"Modell {model} nicht verfügbar"
-            return None
-        except Exception as e:
-            log(f"KI-Fehler ({model}): {e}")
-            return None
+                        self.disabled_reason = "Tageskontingent der KI erreicht (HTTP 429)"
+                elif e.code == 404:
+                    repl = self.replacement(model, msg)
+                    if repl and repl != model and not getattr(self, "_retrying", False):
+                        log(f"Modell {model} nicht verfügbar – wechsle zu {repl}")
+                        if model == self.model:
+                            self.model = repl
+                        if model == self.dossier_model:
+                            self.dossier_model = repl
+                        self._retrying = True
+                        try:
+                            return self.chat(system, user, max_tokens, repl, timeout)
+                        finally:
+                            self._retrying = False
+                    self.blocked[model] = "Modell nicht gefunden (HTTP 404)"
+                    if model == self.model:
+                        self.disabled_reason = f"Modell {model} nicht verfügbar"
+                elif e.code in (500, 502, 503, 504):
+                    self.blocked[model] = f"derzeit überlastet (HTTP {e.code})"
+                return None
+            except Exception as e:
+                self.last_error = str(e)[:80]
+                if attempt < 2:
+                    log(f"KI {model}: {e} – neuer Versuch")
+                    time.sleep(15)
+                    continue
+                log(f"KI-Fehler ({model}): {e}")
+                return None
+        return None
 
     def replacement(self, model, msg=""):
         """Nachfolgemodell finden: zuerst den Vorschlag aus der Fehlermeldung, sonst die Modellliste des Anbieters."""
@@ -517,12 +646,18 @@ Erfinde keine Fakten: Nutze nur, was in Titel, Anriss oder Text steht. Wenn nur 
 Antworte ausschließlich mit einem JSON-Array, ein Objekt pro Meldung:
 {"id": "...", "zusammenfassung": "3–5 Sätze", "kernpunkte": ["…", "…", "…"], "einordnung": "1–2 Sätze: Was bedeutet das für Märkte, Zinsen, Immobilien oder Anleger?", "stimmung": "positiv|neutral|negativ", "relevanz": 1-5, "themen": ["…"]}"""
 
-SYS_BRIEFING = """Du bist Chefredakteurin eines morgendlichen Finanz- und Immobilien-Briefings für eine Leserin in Deutschland.
-Schreibe auf Deutsch, klar, ruhig und präzise, in eigenen Worten, ohne Anlageempfehlungen. Erfinde nichts – nutze nur die gelieferten Meldungen und Marktdaten.
-Antworte ausschließlich mit JSON:
-{"titel": "kurze Überschrift des Tages", "ueberblick": "Absatz mit den 3–5 wichtigsten Entwicklungen", "maerkte": "Absatz: Was bewegt die Aktienmärkte, mit den gelieferten Zahlen",
- "abschnitte": [{"kategorie": "<Kategorie-ID>", "text": "2–4 Sätze", "ids": ["Artikel-IDs, auf die du dich beziehst"]}],
- "beobachten": ["2–4 Punkte, worauf heute/diese Woche zu achten ist (nur aus den Meldungen ableitbar)"]}"""
+SYS_BRIEFING = """Du bist Chefredakteurin eines morgendlichen Finanz-, Wirtschafts- und Immobilien-Briefings für eine fachkundige Leserin in Deutschland.
+Schreibe auf Deutsch, präzise und konkret, in eigenen Worten, ohne Anlageempfehlungen.
+Erfinde nichts: Nutze nur die gelieferten Dossiers, Meldungen und Marktdaten. Jede Aussage soll KONKRET sein – mit Zahlen, Prozenten, Beträgen, Daten, Uhrzeiten, Orten, Namen und Beispielen, soweit sie in den Quellen stehen. Keine allgemeinen Floskeln.
+Termine: Nenne Datum (TT.MM.JJJJ mit Wochentag), Uhrzeit (deutsche Zeit, falls in den Quellen genannt), was genau passiert, wo bzw. wie (z. B. „Quartalszahlen per Pressemitteilung nach US-Börsenschluss, anschließend Telefonkonferenz/Webcast für Analysten auf der Investor-Relations-Seite“) und was erwartet wird (z. B. Analystenschätzungen mit Zahlen). Relative Angaben wie „am Mittwoch“ rechnest du anhand des Erscheinungsdatums der Quelle in ein Datum um. Steht etwas nicht in den Quellen, schreibe „laut Quellen nicht genannt“ statt zu raten.
+Antworte ausschließlich mit JSON in genau dieser Struktur:
+{"titel": "prägnante Überschrift des Tages",
+ "kurz": ["5–8 Stichpunkte: die wichtigsten Entwicklungen, jeder mit mindestens einer konkreten Zahl oder Tatsache"],
+ "maerkte": "Absatz: Was bewegt die Aktienmärkte – mit Indexständen und Veränderungen aus den Marktdaten und konkreten Beispielen (Einzelwerte, Branchen, Gründe)",
+ "abschnitte": [{"kategorie": "<Kategorie-ID>", "text": "4–6 Sätze mit konkreten Fakten, Zahlen und Beispielen", "zahlen": ["Kennzahl: Wert (Kontext)", "…"], "ids": ["Artikel-IDs, auf die du dich stützt"]}],
+ "termine": [{"wann": "Wochentag, TT.MM.JJJJ, Uhrzeit", "was": "Ereignis", "wo": "wo bzw. wie es stattfindet/veröffentlicht wird", "erwartung": "was erwartet wird, mit Zahlen", "warum": "warum es wichtig ist", "ids": ["Artikel-IDs"]}],
+ "beobachten": ["3–6 weitere konkrete Punkte, worauf heute und in den nächsten Tagen zu achten ist"]}
+Liefere für JEDE gelieferte Kategorie einen Abschnitt. Sortiere die Termine chronologisch."""
 
 
 def ai_articles(ai, items, cfg):
@@ -616,40 +751,57 @@ def rule_briefing(items, markets, cfg):
     }
 
 
-def ai_briefing(ai, items, markets, cfg):
-    if not ai.usable():
+def ai_briefing(ai, items, markets, cfg, dossiers=None):
+    model = ai.dossier_model if ai.usable(ai.dossier_model) else ai.model
+    if not ai.usable(model):
         return None
-    since = NOW - dt.timedelta(hours=26)
+    since = NOW - dt.timedelta(hours=30)
     recent = [x for x in items if parse_date(x["published"]) >= since] or items
     recent = sorted(recent, key=lambda x: -x["score"])
     per_cat = {}
     for x in recent:
         for c in x["cats"]:
             per_cat.setdefault(c, [])
-            if len(per_cat[c]) < 8 and x not in per_cat[c]:
+            if len(per_cat[c]) < 10 and x not in per_cat[c]:
                 per_cat[c].append(x)
     cats = {c["id"]: c["name"] for c in cfg["categories"]}
-    blocks = ["MARKTDATEN:\n" + "\n".join(market_lines(markets))]
-    for cid, its in per_cat.items():
+    dos = {d["topic"]: d for d in (dossiers or []) if d.get("datum") == berlin_now().date().isoformat()}
+    blocks = [f"HEUTE: {berlin_now().strftime('%A, %d.%m.%Y, %H:%M')} Uhr (deutsche Zeit)",
+              "MARKTDATEN:\n" + "\n".join(market_lines(markets))]
+    for cid in cats:
+        its = per_cat.get(cid, [])
+        if not its and cid not in dos:
+            continue
         lines = []
         for x in its:
             summ = (x.get("ai") or {}).get("zusammenfassung") or x.get("teaser", "")
-            lines.append(f"- id {x['id']} | {x['source']} | {x['title']} | {summ[:400]}")
-        blocks.append(f"KATEGORIE {cid} ({cats.get(cid, cid)}):\n" + "\n".join(lines))
-    res = parse_json_loose(ai.chat(SYS_BRIEFING, "\n\n".join(blocks), max_tokens=3000))
-    if not isinstance(res, dict) or not res.get("ueberblick"):
+            lines.append(f"- id {x['id']} | {x['source']} | erschienen {x['published'][:16].replace('T', ' ')} UTC | {x['title']} | {summ[:600]}")
+        block = f"KATEGORIE {cid} ({cats[cid]}):\n" + "\n".join(lines)
+        if cid in dos:
+            block += f"\n\nDOSSIER ZU DIESEM THEMA (ausführlich, als Hauptquelle nutzen):\n{dos[cid]['body'][:24000]}"
+        blocks.append(block)
+    res = parse_json_loose(ai.chat(SYS_BRIEFING, "\n\n".join(blocks), max_tokens=12000, model=model, timeout=300))
+    if not isinstance(res, dict) or not (res.get("kurz") or res.get("ueberblick")):
         return None
     valid = {x["id"] for x in items}
     secs = []
-    for s in res.get("abschnitte") or []:
-        if isinstance(s, dict) and s.get("text"):
-            secs.append({"kategorie": s.get("kategorie"), "text": str(s["text"])[:900],
-                         "ids": [i for i in (s.get("ids") or []) if i in valid][:6]})
-    return {"titel": str(res.get("titel", ""))[:160], "ueberblick": str(res["ueberblick"])[:2000],
-            "maerkte": str(res.get("maerkte", ""))[:1500], "abschnitte": secs,
-            "beobachten": [str(b)[:300] for b in (res.get("beobachten") or [])][:5],
-            "art": "ki", "model": ai.model, "at": NOW.isoformat(timespec="seconds")}
-
+    for s_ in res.get("abschnitte") or []:
+        if isinstance(s_, dict) and s_.get("text"):
+            secs.append({"kategorie": s_.get("kategorie"), "text": str(s_["text"])[:2000],
+                         "zahlen": [str(z)[:200] for z in (s_.get("zahlen") or [])][:8],
+                         "ids": [i for i in (s_.get("ids") or []) if i in valid][:6]})
+    termine = []
+    for t in res.get("termine") or []:
+        if isinstance(t, dict) and (t.get("was") or t.get("wann")):
+            termine.append({k: str(t.get(k, ""))[:400] for k in ("wann", "was", "wo", "erwartung", "warum")}
+                           | {"ids": [i for i in (t.get("ids") or []) if i in valid][:4]})
+    kurz = [str(k)[:400] for k in (res.get("kurz") or [])][:10]
+    return {"titel": str(res.get("titel", ""))[:200], "kurz": kurz,
+            "ueberblick": str(res.get("ueberblick") or " ".join(kurz[:2]))[:2000],
+            "maerkte": str(res.get("maerkte", ""))[:2500], "abschnitte": secs, "termine": termine[:12],
+            "beobachten": [str(b_)[:400] for b_ in (res.get("beobachten") or [])][:8],
+            "dossiers": len(dos), "art": "ki", "model": getattr(ai, "last_model", model),
+            "at": NOW.isoformat(timespec="seconds")}
 
 
 # ----------------------------------------------------------------------------- Google-News-Links auflösen
@@ -822,16 +974,29 @@ def build_dossier(ai, cat, items, markets, cfg, gcache):
             + "ARTIKEL:\n\n" + "\n\n".join(parts)
             + ("\n\nHINTERGRUNDWISSEN:\n\n" + "\n\n".join(wparts) if wparts else ""))
 
-    md = None
+    md, used_model = None, None
     for model in (ai.dossier_model, ai.model):
         if ai.usable(model):
-            md = ai.chat(SYS_DOSSIER, user, max_tokens=16000, model=model, timeout=300)
+            md = ai.chat(SYS_DOSSIER, user, max_tokens=30000, model=model, timeout=420)
+            if md:
+                log(f"Dossier {cat['name']}: Entwurf mit {len(md.split())} Wörtern ({model})")
             if md and len(md.split()) > 300:
                 used_model = getattr(ai, "last_model", model)
                 break
             md = None
     if not md:
+        cat["_fail"] = "invalid" if ai.last_error is None else "api"
         return None
+    # Zu kurz für die Materialmenge? Dann gezielt erweitern lassen.
+    min_words = 1000 if len(pool) >= 6 else 600
+    if len(md.split()) < min_words and ai.usable(used_model):
+        ext = ai.chat(SYS_DOSSIER + "\n\nZUSATZAUFTRAG: Der folgende Entwurf ist zu kurz. Überarbeite und ERWEITERE ihn "
+                      "deutlich auf mindestens 1500 Wörter (bei viel Material gern 3000+): mehr konkrete Fakten, Zahlen, Daten, "
+                      "Beispiele, Akteure und Zusammenhänge aus den Quellen, jeweils mit Quellennummer. Gib das vollständige Dossier aus.",
+                      user + "\n\nBISHERIGER ENTWURF:\n\n" + md, max_tokens=30000, model=used_model, timeout=420)
+        if ext and len(ext.split()) > len(md.split()):
+            log(f"Dossier {cat['name']}: erweitert auf {len(ext.split())} Wörter")
+            md = ext
     md = re.sub(r"^```(?:markdown)?\s*|\s*```$", "", md.strip())
     lines = md.splitlines()
     title, lead, body = cat["name"], [], []
@@ -869,7 +1034,8 @@ def run_dossiers(ai, items, markets, cfg, state, prev):
     todo = [c for c in cfg["categories"] if (by_topic.get(c["id"]) or {}).get("edition") != edition]
     if os.environ.get("EXTRA_FORCE_DOSSIERS") == "1":
         todo = list(cfg["categories"])
-    tries = state.setdefault("dossierTries", {})
+    tries = state.setdefault("dossierTries2", {})
+    state.pop("dossierTries", None)
     if state.get("triesModel") != ai.dossier_model:  # nach Modellwechsel neue Versuche erlauben
         tries.clear()
         state["triesModel"] = ai.dossier_model
@@ -886,14 +1052,15 @@ def run_dossiers(ai, items, markets, cfg, state, prev):
             continue
         if sum(1 for x in items if c["id"] in x["cats"]) < 3:
             continue
-        tries[key] = tries.get(key, 0) + 1
         done += 1
+        c = dict(c)
         d = build_dossier(ai, c, items, markets, cfg, gcache)
         if d:
             d["edition"] = edition
             by_topic[c["id"]] = d
-        elif not (ai.usable(ai.dossier_model) or ai.usable(ai.model)):
-            tries[key] -= 1  # lag an gesperrter KI, nicht am Thema – später erneut versuchen
+        elif c.get("_fail") == "invalid":
+            tries[key] = tries.get(key, 0) + 1  # nur unbrauchbare Antworten zählen als Fehlversuch
+        if not (ai.usable(ai.dossier_model) or ai.usable(ai.model)):
             break
         time.sleep(5)
     # Zwischenspeicher begrenzen
@@ -970,7 +1137,7 @@ def main():
     log(f"{len(items)} Meldungen nach Zusammenfassung gleicher Themen")
 
     # 2) Märkte
-    markets = load_markets(cfg)
+    markets = load_markets(cfg, load_prev("markets.json"))
 
     # 3) KI
     ai = AI(cfg, state)
@@ -990,10 +1157,16 @@ def main():
     hour = int(cfg.get("ai", {}).get("briefingHourBerlin", 5))
     today = bnow.date().isoformat()
     briefing = None
-    have_today = prev_brief and prev_brief.get("datum") == today and prev_brief.get("art") == "ki"
+    have_today = prev_brief and prev_brief.get("datum") == today and prev_brief.get("art") == "ki" and prev_brief.get("kurz")
     force = os.environ.get("EXTRA_FORCE_BRIEFING") == "1"
-    if (bnow.hour >= hour and not have_today) or force:
-        briefing = ai_briefing(ai, items, markets, cfg)
+    n_dos_today = sum(1 for d in dossier_list if d.get("datum") == today)
+    # neu schreiben, wenn seit dem letzten Bericht weitere Dossiers fertig geworden sind (max. 4× täglich)
+    more_dos = have_today and n_dos_today > int(prev_brief.get("dossiers", 0)) and int(prev_brief.get("regen", 0)) < 4 \
+        and (n_dos_today == len(cfg["categories"]) or n_dos_today - int(prev_brief.get("dossiers", 0)) >= 3)
+    if (bnow.hour >= hour and (not have_today or more_dos)) or force:
+        briefing = ai_briefing(ai, items, markets, cfg, dossier_list)
+        if briefing and have_today:
+            briefing["regen"] = int(prev_brief.get("regen", 0)) + 1
     if briefing is None and have_today and not force:
         briefing = prev_brief
     if briefing is None:

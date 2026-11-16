@@ -1,0 +1,314 @@
+{
+ "_hinweis": "Diese Datei steuert, welche Nachrichtenquellen und Marktdaten der Automatik-Job holt. Änderungen hier wirken beim nächsten Lauf.",
+ "markets": [
+  {
+   "sym": "^GDAXI",
+   "name": "DAX",
+   "group": "Europa"
+  },
+  {
+   "sym": "^MDAXI",
+   "name": "MDAX",
+   "group": "Europa"
+  },
+  {
+   "sym": "^STOXX50E",
+   "name": "Euro Stoxx 50",
+   "group": "Europa"
+  },
+  {
+   "sym": "^FTSE",
+   "name": "FTSE 100",
+   "group": "Europa"
+  },
+  {
+   "sym": "^GSPC",
+   "name": "S&P 500",
+   "group": "USA"
+  },
+  {
+   "sym": "^NDX",
+   "name": "Nasdaq 100",
+   "group": "USA"
+  },
+  {
+   "sym": "^DJI",
+   "name": "Dow Jones",
+   "group": "USA"
+  },
+  {
+   "sym": "^VIX",
+   "name": "VIX (Angst-Index)",
+   "group": "USA"
+  },
+  {
+   "sym": "ES=F",
+   "name": "S&P 500 Future",
+   "group": "Futures"
+  },
+  {
+   "sym": "NQ=F",
+   "name": "Nasdaq Future",
+   "group": "Futures"
+  },
+  {
+   "sym": "^N225",
+   "name": "Nikkei 225",
+   "group": "Asien"
+  },
+  {
+   "sym": "^HSI",
+   "name": "Hang Seng",
+   "group": "Asien"
+  },
+  {
+   "sym": "000001.SS",
+   "name": "Shanghai Composite",
+   "group": "Asien"
+  },
+  {
+   "sym": "EURUSD=X",
+   "name": "EUR/USD",
+   "group": "Devisen & Rohstoffe"
+  },
+  {
+   "sym": "GC=F",
+   "name": "Gold (USD/oz)",
+   "group": "Devisen & Rohstoffe"
+  },
+  {
+   "sym": "BZ=F",
+   "name": "Brent-Öl (USD)",
+   "group": "Devisen & Rohstoffe"
+  },
+  {
+   "sym": "^TNX",
+   "name": "US-Anleihe 10J (%)",
+   "group": "Zinsen"
+  },
+  {
+   "sym": "BTC-EUR",
+   "name": "Bitcoin (EUR)",
+   "group": "Krypto"
+  }
+ ],
+ "categories": [
+  {
+   "id": "maerkte",
+   "name": "Märkte & Börse"
+  },
+  {
+   "id": "politik",
+   "name": "Politik & Wirtschaftspolitik"
+  },
+  {
+   "id": "geld",
+   "name": "Notenbanken, Zinsen & Konjunktur"
+  },
+  {
+   "id": "bewertung",
+   "name": "Immobilienbewertung"
+  },
+  {
+   "id": "immo_de",
+   "name": "Immobilienmarkt Deutschland"
+  },
+  {
+   "id": "immo_int",
+   "name": "Immobilien international"
+  },
+  {
+   "id": "immo_am",
+   "name": "Real Estate Asset Management"
+  }
+ ],
+ "feeds": [
+  {
+   "cat": "maerkte",
+   "name": "tagesschau Wirtschaft",
+   "url": "https://www.tagesschau.de/wirtschaft/index~rss2.xml"
+  },
+  {
+   "cat": "maerkte",
+   "name": "FAZ Finanzen",
+   "url": "https://www.faz.net/rss/aktuell/finanzen/"
+  },
+  {
+   "cat": "maerkte",
+   "name": "n-tv Wirtschaft",
+   "url": "https://www.n-tv.de/wirtschaft/rss"
+  },
+  {
+   "cat": "maerkte",
+   "name": "CNBC Markets",
+   "url": "https://www.cnbc.com/id/20910258/device/rss/rss.html"
+  },
+  {
+   "cat": "maerkte",
+   "name": "Google News",
+   "q": "Börse DAX Aktien",
+   "lang": "de"
+  },
+  {
+   "cat": "maerkte",
+   "name": "Google News",
+   "q": "stock market Wall Street",
+   "lang": "en"
+  },
+  {
+   "cat": "politik",
+   "name": "tagesschau",
+   "url": "https://www.tagesschau.de/index~rss2.xml"
+  },
+  {
+   "cat": "politik",
+   "name": "FAZ Wirtschaft",
+   "url": "https://www.faz.net/rss/aktuell/wirtschaft/"
+  },
+  {
+   "cat": "politik",
+   "name": "SPIEGEL Wirtschaft",
+   "url": "https://www.spiegel.de/wirtschaft/index.rss"
+  },
+  {
+   "cat": "politik",
+   "name": "BBC Business",
+   "url": "https://feeds.bbci.co.uk/news/business/rss.xml"
+  },
+  {
+   "cat": "politik",
+   "name": "Google News",
+   "q": "Wirtschaftspolitik Bundesregierung",
+   "lang": "de"
+  },
+  {
+   "cat": "politik",
+   "name": "Google News",
+   "q": "Zölle Handelspolitik",
+   "lang": "de"
+  },
+  {
+   "cat": "geld",
+   "name": "EZB",
+   "url": "https://www.ecb.europa.eu/rss/press.html"
+  },
+  {
+   "cat": "geld",
+   "name": "Federal Reserve",
+   "url": "https://www.federalreserve.gov/feeds/press_all.xml"
+  },
+  {
+   "cat": "geld",
+   "name": "Google News",
+   "q": "EZB Leitzins Inflation",
+   "lang": "de"
+  },
+  {
+   "cat": "geld",
+   "name": "Google News",
+   "q": "Federal Reserve interest rates",
+   "lang": "en"
+  },
+  {
+   "cat": "geld",
+   "name": "Google News",
+   "q": "Konjunktur ifo ZEW Deutschland",
+   "lang": "de"
+  },
+  {
+   "cat": "bewertung",
+   "name": "Google News",
+   "q": "Immobilienbewertung",
+   "lang": "de"
+  },
+  {
+   "cat": "bewertung",
+   "name": "Google News",
+   "q": "Gutachterausschuss Bodenrichtwerte",
+   "lang": "de"
+  },
+  {
+   "cat": "bewertung",
+   "name": "Google News",
+   "q": "Verkehrswert ImmoWertV Sachverständige Immobilien",
+   "lang": "de"
+  },
+  {
+   "cat": "bewertung",
+   "name": "Google News",
+   "q": "property valuation RICS",
+   "lang": "en"
+  },
+  {
+   "cat": "immo_de",
+   "name": "FAZ Immobilien",
+   "url": "https://www.faz.net/rss/aktuell/wirtschaft/immobilien/"
+  },
+  {
+   "cat": "immo_de",
+   "name": "Google News",
+   "q": "Immobilienpreise Deutschland",
+   "lang": "de"
+  },
+  {
+   "cat": "immo_de",
+   "name": "Google News",
+   "q": "Immobilienmarkt Wohnungsmarkt Mieten",
+   "lang": "de"
+  },
+  {
+   "cat": "immo_de",
+   "name": "Google News",
+   "q": "Bauzinsen Baufinanzierung",
+   "lang": "de"
+  },
+  {
+   "cat": "immo_int",
+   "name": "Google News",
+   "q": "commercial real estate market",
+   "lang": "en"
+  },
+  {
+   "cat": "immo_int",
+   "name": "Google News",
+   "q": "European property market investment",
+   "lang": "en"
+  },
+  {
+   "cat": "immo_int",
+   "name": "Google News",
+   "q": "housing market prices",
+   "lang": "en"
+  },
+  {
+   "cat": "immo_am",
+   "name": "Google News",
+   "q": "Real Estate Asset Management",
+   "lang": "de"
+  },
+  {
+   "cat": "immo_am",
+   "name": "Google News",
+   "q": "offene Immobilienfonds Transaktionsmarkt",
+   "lang": "de"
+  },
+  {
+   "cat": "immo_am",
+   "name": "Google News",
+   "q": "real estate asset manager fund REIT",
+   "lang": "en"
+  }
+ ],
+ "newsMaxAgeHours": 72,
+ "newsPerCategory": 60,
+ "ai": {
+  "_hinweis": "KI-Auswertung. Läuft nur, wenn im GitHub-Repository ein Secret AI_API_KEY hinterlegt ist. Standard: Google Gemini (kostenloser Schlüssel aus Google AI Studio).",
+  "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+  "model": "gemini-2.5-flash-lite",
+  "maxCallsPerDay": 40,
+  "maxArticlesPerRun": 32,
+  "articlesPerCall": 8,
+  "fetchFullText": true,
+  "briefingHourBerlin": 5
+ }
+}

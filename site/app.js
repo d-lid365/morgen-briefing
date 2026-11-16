@@ -255,32 +255,49 @@
     const shown = new Set();
     if (b) {
       const isAI = b.art === "ki";
+      const dByT = Object.fromEntries(dossierItems().map((d) => [d.topic, d]));
+      // 1) Kurzüberblick
       h += `<section class="lead">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
           <span class="eyebrow">${esc(new Date(b.at || Date.now()).toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" }))}</span>
           <span class="badge ${isAI ? "ai" : "auto"}">${isAI ? "KI-Bericht · " + esc(clock(b.at)) + " Uhr" : "automatisch zusammengestellt"}</span></div>
         <h2>${esc(b.titel)}</h2>
-        ${isAI ? `<p>${esc(b.ueberblick)}</p>` : ""}
-        ${b.maerkte ? `<p class="mk">${esc(b.maerkte)}</p>` : ""}
+        ${b.kurz && b.kurz.length ? `<div class="quick"><b>Kurzüberblick</b><ul>${b.kurz.map((k) => `<li>${esc(k)}</li>`).join("")}</ul></div>` : isAI && b.ueberblick ? `<p>${esc(b.ueberblick)}</p>` : ""}
         ${tickStrip()}
+        ${b.maerkte ? `<details class="mkd"${b.kurz && b.kurz.length ? "" : " open"}><summary>Was die Märkte bewegt</summary><p class="mk">${esc(b.maerkte)}</p></details>` : ""}
       </section>`;
-      h += dossierStrip();
-      if (b.beobachten && b.beobachten.length) {
-        h += `<div class="section-h">Worauf heute zu achten ist</div><div class="sec"><ul class="watch">${b.beobachten.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`;
-      }
+      // 2) Bereiche
       const secs = (b.abschnitte || []).filter((s) => !S.hiddenCats.has(s.kategorie));
       if (secs.length) h += `<div class="section-h">Die Bereiche im Überblick</div>`;
       secs.forEach((s) => {
-        // jeden Artikel nur einmal im Briefing zeigen, auch wenn er zu mehreren Bereichen passt
-        const arts = (s.ids || []).filter((id) => !shown.has(id)).map(byId).filter(Boolean);
+        const arts = (s.ids || []).filter((id) => !shown.has(id)).map(byId).filter(Boolean).slice(0, 3);
         arts.forEach((a) => shown.add(a.id));
+        const d = dByT[s.kategorie];
         h += `<div class="sec"><div class="eyebrow">${esc(catName(s.kategorie))}</div>
-          ${isAI ? `<p>${esc(s.text)}</p>` : ""}</div>`;
+          ${isAI ? `<p>${esc(s.text)}</p>` : ""}
+          ${s.zahlen && s.zahlen.length ? `<ul class="nums">${s.zahlen.map((z) => `<li>${esc(z)}</li>`).join("")}</ul>` : ""}
+          ${d ? `<button class="btn primary" style="margin-top:4px" data-act="dossier" data-topic="${esc(d.topic)}">Ausführliches Dossier lesen · ${readMin(d.words)} Min.</button>` : ""}
+        </div>`;
         h += arts.map(card).join("");
-        h += `<div style="text-align:right;margin:-2px 2px 16px"><button class="btn" data-act="gocat" data-cat="${esc(s.kategorie)}">Alle Meldungen: ${esc(catName(s.kategorie))} →</button></div>`;
+        h += `<div style="text-align:right;margin:-2px 2px 18px"><button class="btn" data-act="gocat" data-cat="${esc(s.kategorie)}">Alle Meldungen: ${esc(catName(s.kategorie))} →</button></div>`;
       });
+      // 3) Worauf heute zu achten ist
+      if ((b.termine && b.termine.length) || (b.beobachten && b.beobachten.length)) {
+        h += `<div class="section-h">Worauf heute zu achten ist</div>`;
+        (b.termine || []).forEach((t) => {
+          const src = (t.ids || []).map(byId).filter(Boolean)[0];
+          h += `<div class="term"><div class="when">${esc(t.wann || "Termin")}</div>
+            <div class="what">${esc(t.was)}</div>
+            ${t.wo ? `<div class="row2"><span>Wo / wie</span>${esc(t.wo)}</div>` : ""}
+            ${t.erwartung ? `<div class="row2"><span>Erwartung</span>${esc(t.erwartung)}</div>` : ""}
+            ${t.warum ? `<div class="row2"><span>Warum wichtig</span>${esc(t.warum)}</div>` : ""}
+            ${src ? `<div class="row2"><span>Quelle</span><a href="${esc(safeUrl(src.url || src.link))}" target="_blank" rel="noopener">${esc(src.source)}: ${esc(src.title)}</a></div>` : ""}
+          </div>`;
+        });
+        if (b.beobachten && b.beobachten.length) h += `<div class="sec"><div class="eyebrow">Außerdem im Blick behalten</div><ul class="watch">${b.beobachten.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`;
+      }
+      h += dossierStrip();
     }
-    // Neu seit dem Bericht
     if (b && b.at) {
       const fresh = items().filter((x) => visible(x) && new Date(x.published) > new Date(b.at) && !shown.has(x.id)).sort((a, c) => c.score - a.score).slice(0, 8);
       if (fresh.length) h += `<div class="section-h">Neu seit dem Bericht <small>${fresh.length} wichtigste</small></div>` + fresh.map(card).join("");
@@ -359,7 +376,7 @@
     const byT = Object.fromEntries(ds.map((d) => [d.topic, d]));
     (cats.length ? cats : ds.map((d) => ({ id: d.topic, name: d.name }))).forEach((c) => {
       const d = byT[c.id];
-      if (!d) { h += `<div class="dcard missing"><div class="eyebrow">${esc(c.name)}</div><p>Noch kein Dossier – es entsteht beim nächsten Morgenlauf${S.status && S.status.ai && !S.status.ai.enabled ? " (KI-Schlüssel erforderlich)" : ""}.</p></div>`; return; }
+      if (!d) { h += `<div class="dcard missing"><div class="eyebrow">${esc(c.name)}</div><p>Noch kein Dossier – es wird bei einem der nächsten Läufe erstellt${S.status && S.status.ai && !S.status.ai.enabled ? " (KI-Schlüssel erforderlich)" : ""}.</p></div>`; return; }
       const isNew = done[d.topic] !== d.at;
       h += `<button class="dcard" data-act="dossier" data-topic="${esc(d.topic)}">
         <div class="eyebrow">${isNew ? '<span class="dot" style="margin-right:6px"></span>' : ""}${esc(c.name)}</div>
@@ -436,13 +453,13 @@
     const ms = (S.markets && S.markets.markets) || [];
     if (!ms.length) { main.innerHTML = `<div class="empty">Noch keine Marktdaten.</div>`; return; }
     const groups = [...new Set(ms.map((m) => m.group))];
-    let h = `<p class="muted" style="font-size:.78em;margin:0 2px 12px">Kurse von Yahoo Finance, i. d. R. ca. 15 Min. verzögert. Veränderung zum Vortagesschluss; Linie = letzter Monat.</p>`;
+    let h = `<p class="muted" style="font-size:.78em;margin:0 2px 12px">Kurse von Yahoo Finance bzw. ersatzweise CNBC, i. d. R. ca. 15 Min. verzögert. Veränderung zum Vortagesschluss; Linie = letzter Monat.</p>`;
     groups.forEach((g) => {
       h += `<div class="section-h" style="margin-top:6px">${esc(g)}</div><div class="mgroup">`;
       ms.filter((m) => m.group === g).forEach((m) => {
         if (!m.ok || m.price == null) { h += `<div class="mrow"><div><div class="nm">${esc(m.name)}</div><div class="sub">derzeit nicht verfügbar</div></div><div></div><div></div></div>`; return; }
         const up = (m.chgPct || 0) >= 0;
-        h += `<div class="mrow"><div><div class="nm">${esc(m.name)}</div><div class="sub">1 Monat: ${pct(m.chg1mPct)}${m.time ? " · " + esc(clock(m.time * 1000)) : ""}</div></div>
+        h += `<div class="mrow"><div><div class="nm">${esc(m.name)}</div><div class="sub">${m.stale ? "letzter bekannter Stand" + (m.time ? " vom " + esc(new Date(m.time * 1000).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })) : "") : "1 Monat: " + pct(m.chg1mPct) + (m.time ? " · " + esc(clock(m.time * 1000)) : "")}</div></div>
           ${spark(m.spark, (m.chg1mPct || 0) >= 0)}
           <div class="val"><b>${nf(m.price, m.price > 1000 ? 0 : 2)}</b><span class="pill ${up ? "up" : "down"}">${pct(m.chgPct)}</span></div></div>`;
       });

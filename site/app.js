@@ -246,6 +246,7 @@
     const b = S.briefing;
     if (!b && !S.news) { main.innerHTML = `<div class="empty">Noch keine Daten vorhanden.<br>Nach der Einrichtung erscheint hier jeden Morgen dein Bericht.</div>`; return; }
     let h = "";
+    const shown = new Set();
     if (b) {
       const isAI = b.art === "ki";
       h += `<section class="lead">
@@ -263,7 +264,9 @@
       const secs = (b.abschnitte || []).filter((s) => !S.hiddenCats.has(s.kategorie));
       if (secs.length) h += `<div class="section-h">Die Bereiche im Überblick</div>`;
       secs.forEach((s) => {
-        const arts = (s.ids || []).map(byId).filter(Boolean);
+        // jeden Artikel nur einmal im Briefing zeigen, auch wenn er zu mehreren Bereichen passt
+        const arts = (s.ids || []).filter((id) => !shown.has(id)).map(byId).filter(Boolean);
+        arts.forEach((a) => shown.add(a.id));
         h += `<div class="sec"><div class="eyebrow">${esc(catName(s.kategorie))}</div>
           ${isAI ? `<p>${esc(s.text)}</p>` : ""}</div>`;
         h += arts.map(card).join("");
@@ -272,7 +275,7 @@
     }
     // Neu seit dem Bericht
     if (b && b.at) {
-      const fresh = items().filter((x) => visible(x) && new Date(x.published) > new Date(b.at)).sort((a, c) => c.score - a.score).slice(0, 8);
+      const fresh = items().filter((x) => visible(x) && new Date(x.published) > new Date(b.at) && !shown.has(x.id)).sort((a, c) => c.score - a.score).slice(0, 8);
       if (fresh.length) h += `<div class="section-h">Neu seit dem Bericht <small>${fresh.length} wichtigste</small></div>` + fresh.map(card).join("");
     }
     main.innerHTML = h;

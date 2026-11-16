@@ -438,6 +438,7 @@ class AI:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 j = json.loads(r.read().decode())
+            self.last_model = model
             return j["choices"][0]["message"]["content"]
         except urllib.error.HTTPError as e:
             msg = e.read().decode("utf-8", "replace")[:300]
@@ -449,10 +450,45 @@ class AI:
                 if model == self.model:
                     self.disabled_reason = "Tageskontingent der KI erreicht (HTTP 429)"
             elif e.code == 404:
+                repl = self.replacement(model, msg)
+                if repl and repl != model and not getattr(self, "_retrying", False):
+                    log(f"Modell {model} nicht verfügbar – wechsle zu {repl}")
+                    self.state["aiByModel"][model] = max(0, self.used(model) - 1)
+                    self.state["aiCalls"] = max(0, self.state.get("aiCalls", 1) - 1)
+                    if model == self.model:
+                        self.model = repl
+                    if model == self.dossier_model:
+                        self.dossier_model = repl
+                    self._retrying = True
+                    try:
+                        return self.chat(system, user, max_tokens, repl, timeout)
+                    finally:
+                        self._retrying = False
                 self.blocked[model] = "Modell nicht gefunden (HTTP 404)"
+                if model == self.model:
+                    self.disabled_reason = f"Modell {model} nicht verfügbar"
             return None
         except Exception as e:
             log(f"KI-Fehler ({model}): {e}")
+            return None
+
+    def replacement(self, model, msg=""):
+        """Nachfolgemodell finden: zuerst den Vorschlag aus der Fehlermeldung, sonst die Modellliste des Anbieters."""
+        m = re.search(r"use models/([\w.\-]+)", msg or "")
+        if m:
+            return m.group(1)
+        try:
+            base = self.url.rsplit("/chat/completions", 1)[0]
+            req = urllib.request.Request(base + "/models", headers={"Authorization": f"Bearer {self.key}"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                ids = [x.get("id", "").replace("models/", "") for x in json.loads(r.read().decode()).get("data", [])]
+            want_lite = "lite" in model
+            cands = [i for i in ids if "flash" in i and ("lite" in i) == want_lite
+                     and not re.search(r"preview|exp|tts|image|audio|live|embed", i)]
+            ver = lambda i: [int(x) for x in re.findall(r"\d+", i)[:2]] or [0]
+            return sorted(cands, key=ver)[-1] if cands else None
+        except Exception as e:
+            log(f"Modellliste nicht abrufbar: {e}")
             return None
 
     @property
@@ -791,7 +827,7 @@ def build_dossier(ai, cat, items, markets, cfg, gcache):
         if ai.usable(model):
             md = ai.chat(SYS_DOSSIER, user, max_tokens=16000, model=model, timeout=300)
             if md and len(md.split()) > 300:
-                used_model = model
+                used_model = getattr(ai, "last_model", model)
                 break
             md = None
     if not md:
@@ -834,6 +870,9 @@ def run_dossiers(ai, items, markets, cfg, state, prev):
     if os.environ.get("EXTRA_FORCE_DOSSIERS") == "1":
         todo = list(cfg["categories"])
     tries = state.setdefault("dossierTries", {})
+    if state.get("triesModel") != ai.dossier_model:  # nach Modellwechsel neue Versuche erlauben
+        tries.clear()
+        state["triesModel"] = ai.dossier_model
     for k in [k for k in tries if not k.startswith(edition)]:
         tries.pop(k, None)
     done = 0
@@ -853,6 +892,9 @@ def run_dossiers(ai, items, markets, cfg, state, prev):
         if d:
             d["edition"] = edition
             by_topic[c["id"]] = d
+        elif not (ai.usable(ai.dossier_model) or ai.usable(ai.model)):
+            tries[key] -= 1  # lag an gesperrter KI, nicht am Thema – später erneut versuchen
+            break
         time.sleep(5)
     # Zwischenspeicher begrenzen
     if len(gcache) > 4000:
